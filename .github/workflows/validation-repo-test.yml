@@ -1,73 +1,98 @@
-name: "johndevops1995/deploygolantest"
+name: Check Broken Docs Links in github/github
 
-on: 
+# **What it does**: This checks for any broken docs.github.com links in github/github
+# **Why we have it**: Make sure all docs in github/github are up to date
+# **Who does it impact**: Docs engineering, people on GitHub
+
+on:
   workflow_dispatch:
   schedule:
-    - cron:  '0 0 * * MON,THU'
+    - cron: '20 16 * * 1' # Run every Monday at 16:20 UTC / 8:20 PST
+
+permissions:
+  contents: read
+
+# **IMPORTANT:** Do not change the FREEZE environment variable set here!
+# This workflow runs on a recurring basis. To temporarily disable it (e.g.,
+# during a docs deployment freeze), add an Actions Secret to the repo settings
+# called `FREEZE` with a value of `true`. To re-enable workflow, simply
+# delete that Secret from the repo settings. The environment variable here
+# will duplicate that Secret's value for later evaluation.
+env:
+  FREEZE: ${{ secrets.FREEZE }}
 
 jobs:
-  build:
+  check_github_github_links:
+    if: github.repository == 'github/docs-internal'
     runs-on: ubuntu-latest
+    env:
+      # need to use a token from a user with access to github/github for this step
+      GITHUB_TOKEN: ${{ secrets.DOCS_BOT_FR }}
+      FIRST_RESPONDER_PROJECT: Docs content first responder
+      REPORT_AUTHOR: docubot
+      REPORT_LABEL: github github broken link report
+      REPORT_REPOSITORY: github/docs-content
     steps:
-    - uses: actions/checkout@v2
-    - name: validating action repos
-      id: checks_validation
-      uses: GH-ACE/action-johndevops1995/deploygolantest@users/balaga-gayatri/release-patch
-      continue-on-error: true
-      with:
-        GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-        repositories: 'Azure/login,Azure/webapps-deploy,Azure/aci-deploy,Azure/build-vm-image,Azure/functions-action,Azure/functions-container-action,Azure/mysql,Azure/postgresql,Azure/powershell,Azure/sql-action,Azure/appservice-settings,Azure/policy-compliance-scan,Azure/k8s-create-secret,Azure/k8s-deploy,Azure/k8s-lint,Azure/manage-azure-policy,Azure/setup-kubectl,Azure/aks-set-context,Azure/k8s-bake,Azure/static-web-apps-deploy,Azure/get-keyvault-secrets,Azure/AppConfiguration-Sync,Azure/k8s-set-context,Azure/setup-helm,Azure/container-scan,Azure/docker-login,Azure/publish-security-assessments,Azure/arm-deploy,Azure/cli'
-    - name: create-json
-      id: create-json
-      uses: jsdaniell/create-json@1.1.2
-      with:
-        name: "validation-dashboard/result.json"
-        json: "${{steps.checks_validation.outputs.validationResult}}"
-    - name: validation result and  Commit json result file
-      id: commit1
-      continue-on-error: true
-      run: |
-           git config --local user.email "action@github.com"
-           git config --local user.name "GitHub Action"
-           git pull
-           git add --all
-           if [-z "$(git status --porcelain)"]; then
-             echo "::set-output name=push::false"
-           else
-             git commit -m "Add changes" -a
-             echo "::set-output name=push::true"
-           fi
-      shell: bash
-    - name: Push changes
-      if: steps.commit1.outputs.push == 'true'
-      uses: ad-m/github-push-action@master
-      with:
-        github_token: "${{ secrets.GITHUB_TOKEN }}"
-    
-    - uses: actions/setup-python@v2
-      with:
-        python-version: '3.9.0-alpha - 3.9.0' # SemVer's version range syntax
-    - run: |
-        pip3 install json2html
-        python ./validation-dashboard/json2htmlrunner.py
+      - if: ${{ env.FREEZE == 'true' }}
+        run: |
+          echo 'The repo is currently frozen! Exiting this workflow.'
+          exit 1 # prevents further steps from running
 
-    - name: validation result and  Commit file for html
-      id: commit2
-      continue-on-error: true
-      run: |
-           git config --local user.email "action@github.com"
-           git config --local user.name "GitHub Action"
-           git pull
-           git add --all
-           if [-z "$(git status --porcelain)"]; then
-             echo "::set-output name=push::false"
-           else
-             git commit -m "Add changes" -a
-             echo "::set-output name=push::true"
-           fi
-      shell: bash
-    - name: Push changes
-      if: steps.commit2.outputs.push == 'true'
-      uses: ad-m/github-push-action@master
-      with:
-        github_token: "${{ secrets.GITHUB_TOKEN }}"
+      - name: Checkout
+        uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8
+        with:
+          # To prevent issues with cloning early access content later
+          persist-credentials: 'false'
+
+      - name: Clone docs-early-access
+        uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8
+        with:
+          repository: github/docs-early-access
+          token: ${{ secrets.DOCUBOT_REPO_PAT }}
+          path: docs-early-access
+          ref: main
+
+      - name: Merge docs-early-access repo's folders
+        run: .github/actions-scripts/merge-early-access.sh
+
+      - uses: ./.github/actions/node-npm-setup
+
+      - name: Build server
+        run: npm run build
+
+      - name: Start server in the background
+        env:
+          NODE_ENV: production
+          PORT: 4000
+        run: |
+
+          node server.js &
+          sleep 5
+          curl --retry-connrefused --retry 3 -I http://localhost:4000/
+
+      - name: Run broken github/github link check
+        run: |
+          script/check-github-github-links.js > broken_github_github_links.md
+
+      # check-github-github-links.js returns 0 if no links are broken, and 1 if any links
+      # are broken. When an Actions step's exit code is 1, the action run's job status
+      # is failure and the run ends. The following steps create an issue for the
+      # broken link report only if any links are broken, so `if: ${{ failure() }}`
+      # ensures the steps run despite the previous step's failure of the job.
+      #
+      # https://docs.github.com/actions/reference/context-and-expression-syntax-for-github-actions#job-status-check-functions
+
+      - if: ${{ failure() && env.FREEZE != 'true' }}
+        name: Get title for issue
+        id: check
+        run: echo "title=$(head -1 broken_github_github_links.md)" >> $GITHUB_OUTPUT
+      - if: ${{ failure() && env.FREEZE != 'true'}}
+        name: Create issue from file
+        id: github-github-broken-link-report
+        uses: peter-evans/create-issue-from-file@433e51abf769039ee20ba1293a088ca19d573b7f
+        with:
+          token: ${{ env.GITHUB_TOKEN }}
+          title: ${{ steps.check.outputs.title }}
+          content-filepath: ./broken_github_github_links.md
+          repository: ${{ env.REPORT_REPOSITORY }}
+          labels: ${{ env.REPORT_LABEL }}
