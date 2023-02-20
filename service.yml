@@ -1,0 +1,15 @@
+---
+
+apiVersion: v1
+kind: Servcie
+metadata:
+  name: go-web-app
+spec
+  type: LoadBalancer
+  ports:
+- name: http
+  port: 80
+  targetPort: 3000
+selector:
+  name: go-web-app
+

@@ -1,0 +1,22 @@
+---
+apiVersion: apps/v1
+kind: deployment
+metadata:
+  name: go-web-app-application
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      name: go-web-app
+template:
+  metadata:
+    labels:
+      name: go-web-app
+  spec:
+    containers:
+    - name: application
+      image: imagegotest1:latest
+      imagePullPolicy: IfNotPresent
+      ports:
+       - containerPort: 3000
+
